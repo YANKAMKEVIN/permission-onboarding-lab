@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -72,15 +73,6 @@ fun App() {
     }
 }
 
-private enum class PermissionStep {
-    Value,
-    Rationale,
-    SystemAsk,
-    Denied,
-    Limited,
-    Granted
-}
-
 private data class StepCopy(
     val step: PermissionStep,
     val tab: String,
@@ -100,6 +92,7 @@ private val Gold = Color(0xFFB66F12)
 private val Violet = Color(0xFF7354B8)
 private val Red = Color(0xFFD34A42)
 private val Slate = Color(0xFF34444B)
+private val Brick = Color(0xFF9A3D2C)
 
 private val steps = listOf(
     StepCopy(
@@ -149,13 +142,22 @@ private val steps = listOf(
         body = "After permission is granted, show what changed immediately.",
         rule = "Close the loop with visible progress or newly available content.",
         accent = Slate
+    ),
+    StepCopy(
+        step = PermissionStep.Blocked,
+        tab = "Blocked",
+        title = "Route to Settings",
+        body = "After repeated refusals the system stops asking. Explain where to turn it on instead of re-prompting.",
+        rule = "Never loop the system prompt: once it is blocked, link to Settings.",
+        accent = Brick
     )
 )
 
 @Composable
 private fun PermissionOnboardingLab() {
-    var selectedIndex by remember { mutableStateOf(1) }
-    val selected = steps[selectedIndex]
+    var flow by remember { mutableStateOf(PermissionFlowState()) }
+    val onAction: (PermissionAction) -> Unit = { flow = reduce(flow, it) }
+    val selected = steps.first { it.step == flow.step }
 
     LazyColumn(
         modifier = Modifier
@@ -167,14 +169,16 @@ private fun PermissionOnboardingLab() {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item { Header() }
-        item { StepTabs(selectedIndex) { selectedIndex = it } }
+        item {
+            StepTabs(steps.indexOf(selected)) { onAction(PermissionAction.JumpTo(steps[it].step)) }
+        }
         item {
             AnimatedContent(
-                targetState = selected,
+                targetState = flow,
                 transitionSpec = { fadeIn() togetherWith fadeOut() },
                 label = "permission-step"
-            ) { step ->
-                PermissionPreview(step)
+            ) { shown ->
+                PermissionPreview(steps.first { it.step == shown.step }, shown, onAction)
             }
         }
         item { RuleCard(selected) }
@@ -227,7 +231,7 @@ private fun StepTabs(selectedIndex: Int, onSelected: (Int) -> Unit) {
 }
 
 @Composable
-private fun PermissionPreview(step: StepCopy) {
+private fun PermissionPreview(step: StepCopy, flow: PermissionFlowState, onAction: (PermissionAction) -> Unit) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -239,7 +243,7 @@ private fun PermissionPreview(step: StepCopy) {
             verticalArrangement = Arrangement.spacedBy(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            PhoneMock(step)
+            PhoneMock(step, flow, onAction)
             Text(
                 text = step.title,
                 color = Ink,
@@ -255,24 +259,29 @@ private fun PermissionPreview(step: StepCopy) {
                 textAlign = TextAlign.Center
             )
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(modifier = Modifier.weight(1f), onClick = {}) { Text("Not now") }
+                secondaryLabel(flow)?.let { label ->
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        onClick = { onAction(PermissionAction.Secondary) }
+                    ) { Text(label) }
+                }
                 Button(
-                    modifier = Modifier.weight(1f),
-                    onClick = {},
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    onClick = { onAction(PermissionAction.Primary) },
                     colors = ButtonDefaults.buttonColors(containerColor = step.accent),
                     shape = RoundedCornerShape(15.dp)
-                ) { Text(cta(step.step), fontWeight = FontWeight.Bold) }
+                ) { Text(primaryLabel(flow), fontWeight = FontWeight.Bold) }
             }
         }
     }
 }
 
 @Composable
-private fun PhoneMock(step: StepCopy) {
+private fun PhoneMock(step: StepCopy, flow: PermissionFlowState, onAction: (PermissionAction) -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(266.dp)
+            .height(300.dp)
             .clip(RoundedCornerShape(22.dp))
             .background(step.accent.copy(alpha = 0.10f))
             .padding(14.dp),
@@ -292,7 +301,7 @@ private fun PhoneMock(step: StepCopy) {
                     PermissionIcon(step)
                     Column(Modifier.padding(start = 12.dp)) {
                         Text("Smart reminders", color = Ink, fontWeight = FontWeight.Black)
-                        Text(status(step.step), color = Muted, fontSize = 13.sp)
+                        Text(status(flow), color = Muted, fontSize = 13.sp)
                     }
                 }
                 LinearProgressIndicator(
@@ -305,8 +314,9 @@ private fun PhoneMock(step: StepCopy) {
                     trackColor = step.accent.copy(alpha = 0.13f)
                 )
                 when (step.step) {
-                    PermissionStep.SystemAsk -> SystemPrompt(step)
+                    PermissionStep.SystemAsk -> SystemPrompt(step, onAction)
                     PermissionStep.Denied -> DeniedState(step)
+                    PermissionStep.Blocked -> if (flow.settingsOpen) SettingsState(step) else BlockedState(step)
                     PermissionStep.Limited -> LimitedState(step)
                     PermissionStep.Granted -> GrantedState(step)
                     else -> ValueState(step)
@@ -326,7 +336,11 @@ private fun PermissionIcon(step: StepCopy) {
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            imageVector = if (step.step == PermissionStep.Denied) Icons.Filled.Close else Icons.Filled.Check,
+            imageVector = if (step.step == PermissionStep.Denied || step.step == PermissionStep.Blocked) {
+                Icons.Filled.Close
+            } else {
+                Icons.Filled.Check
+            },
             contentDescription = null,
             tint = step.accent
         )
@@ -343,7 +357,7 @@ private fun ValueState(step: StepCopy) {
 }
 
 @Composable
-private fun SystemPrompt(step: StepCopy) {
+private fun SystemPrompt(step: StepCopy, onAction: (PermissionAction) -> Unit) {
     Surface(
         shape = RoundedCornerShape(18.dp),
         color = Paper,
@@ -355,13 +369,31 @@ private fun SystemPrompt(step: StepCopy) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text("Allow reminder access?", color = Ink, fontWeight = FontWeight.Black)
-            Text("Used only when you create a timed reminder.", color = Muted, textAlign = TextAlign.Center, lineHeight = 18.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Surface(shape = RoundedCornerShape(50), color = Color.White, border = BorderStroke(1.dp, Line)) {
-                    Text(text = "Deny", modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp), color = Muted, fontWeight = FontWeight.Bold)
+            Text("Only used for timed reminders.", color = Muted, textAlign = TextAlign.Center, lineHeight = 18.sp)
+            // Simulated OS dialog: each choice feeds the reducer like a real permission result.
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Surface(
+                    onClick = { onAction(PermissionAction.SystemDeny) },
+                    shape = RoundedCornerShape(50),
+                    color = Color.White,
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Text(text = "Deny", fontSize = 13.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp), color = Muted, fontWeight = FontWeight.Bold)
                 }
-                Surface(shape = RoundedCornerShape(50), color = step.accent) {
-                    Text(text = "Allow", modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp), color = Color.White, fontWeight = FontWeight.Bold)
+                Surface(
+                    onClick = { onAction(PermissionAction.SystemAllowSelected) },
+                    shape = RoundedCornerShape(50),
+                    color = Color.White,
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Text(text = "Selected", fontSize = 13.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp), color = Ink, fontWeight = FontWeight.Bold)
+                }
+                Surface(
+                    onClick = { onAction(PermissionAction.SystemAllow) },
+                    shape = RoundedCornerShape(50),
+                    color = step.accent
+                ) {
+                    Text(text = "Allow", fontSize = 13.sp, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp), color = Color.White, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -374,6 +406,37 @@ private fun DeniedState(step: StepCopy) {
         FeatureRow("Manual reminders still work", step.accent)
         FeatureRow("Automatic timing is paused", step.accent)
         Text("No guilt copy. No dead end.", color = step.accent, fontWeight = FontWeight.Black)
+    }
+}
+
+@Composable
+private fun BlockedState(step: StepCopy) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        FeatureRow("The system will not ask again", step.accent)
+        FeatureRow("Settings > Notifications > Reminders", step.accent)
+    }
+}
+
+/** Simulated system Settings page: the only way out of a blocked permission. */
+@Composable
+private fun SettingsState(step: StepCopy) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Settings · App permissions", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            color = Paper,
+            border = BorderStroke(1.dp, Line)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Reminders", color = Ink, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("Off", color = step.accent, fontWeight = FontWeight.Black)
+            }
+        }
+        Text("Use \"Turn on\" to simulate the user enabling it.", color = Muted, fontSize = 13.sp, lineHeight = 18.sp)
     }
 }
 
@@ -433,22 +496,14 @@ private fun RuleCard(step: StepCopy) {
     }
 }
 
-private fun cta(step: PermissionStep): String = when (step) {
-    PermissionStep.Value -> "Continue"
-    PermissionStep.Rationale -> "Allow access"
-    PermissionStep.SystemAsk -> "Allow"
-    PermissionStep.Denied -> "Use manual"
-    PermissionStep.Limited -> "Keep limited"
-    PermissionStep.Granted -> "Start"
-}
-
-private fun status(step: PermissionStep): String = when (step) {
+private fun status(flow: PermissionFlowState): String = when (flow.step) {
     PermissionStep.Value -> "Previewing value"
     PermissionStep.Rationale -> "Explaining why"
     PermissionStep.SystemAsk -> "System moment"
     PermissionStep.Denied -> "Permission denied"
     PermissionStep.Limited -> "Limited access"
     PermissionStep.Granted -> "Ready to use"
+    PermissionStep.Blocked -> if (flow.settingsOpen) "System settings" else "Blocked by the system"
 }
 
 private fun progress(step: PermissionStep): Float = when (step) {
@@ -457,5 +512,6 @@ private fun progress(step: PermissionStep): Float = when (step) {
     PermissionStep.SystemAsk -> 0.52f
     PermissionStep.Denied -> 0.66f
     PermissionStep.Limited -> 0.82f
+    PermissionStep.Blocked -> 0.82f
     PermissionStep.Granted -> 1f
 }
